@@ -1,33 +1,30 @@
-"""关闭 AutoCAD（建完即存、存完即关——窗口纪律）。"""
-import pythoncom
+"""按完整路径关闭一份已保存的图纸。AutoCAD 会处理关闭时的保存提示。"""
+import argparse
+from pathlib import Path
+
 import win32com.client
-import time
-
-pythoncom.CoInitialize()
-_BUSY = (-2147418111, -2147417846, -2147417848)
 
 
-def R(fn):
-    for i in range(40):
-        try:
-            return fn()
-        except pythoncom.com_error as e:
-            if e.hresult in _BUSY and i < 39:
-                time.sleep(0.5)
-                continue
-            raise
-    raise RuntimeError("unreachable")
+def close_saved_drawing(app, target):
+    for doc in app.Documents:
+        if doc.Path and Path(doc.FullName).resolve() == target:
+            if not doc.Saved:
+                raise RuntimeError(f"图纸有未保存的修改：{target}")
+            doc.Close(True)
+            return
+    raise RuntimeError(f"未找到已打开的图纸：{target}")
 
 
-try:
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("drawing", type=Path, help="要关闭的 DWG 完整路径")
+    args = parser.parse_args()
+    if not args.drawing.is_absolute() or args.drawing.suffix.lower() != ".dwg":
+        parser.error("请提供 DWG 的完整路径")
     app = win32com.client.GetActiveObject("AutoCAD.Application")
-    n = R(lambda: app.Documents.Count)
-    for i in range(n - 1, -1, -1):
-        d = R(lambda i=i: app.Documents.Item(i))
-        name = R(lambda: d.Name)
-        R(lambda: d.Close(False))
-        print(f"closed {name}")
-    R(lambda: app.Quit())
-    print("AutoCAD 已退出")
-except Exception as e:
-    print("关闭失败:", str(e)[:120])
+    close_saved_drawing(app, args.drawing.resolve())
+    print(f"已关闭：{args.drawing}")
+
+
+if __name__ == "__main__":
+    main()

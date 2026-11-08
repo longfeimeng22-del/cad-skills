@@ -14,19 +14,13 @@
   图框内区 (25,5)-(415,292)；标题栏 (275,5)-(415,37)
 验证：L2 实体数、L3 分类型/图层审计、AUDIT+PURGE、绘图输出 PDF+PNG 视觉 QA。
 """
-import os
-import sys
+import argparse
+from pathlib import Path
+from tempfile import mkdtemp
 import time
 import math
 import pythoncom
 import win32com.client
-
-sys.argv = sys.argv if len(sys.argv) > 1 else [sys.argv[0]]
-KEEP = "keep" in sys.argv  # 调试期 keep：不退出 AutoCAD
-
-OUT = r"C:\Users\22374\Desktop\湛江北海\学习课程\cad"
-os.makedirs(OUT, exist_ok=True)
-
 
 def V8(*coords):
     return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, list(coords))
@@ -65,34 +59,9 @@ def connect():
 
 
 def setup(app):
-    """准备干净文档。全程不碰命令行（SendCommand 在挂起/空选择时会卡死 COM）。
-    铁律：绝不让 Documents 变 0 —— 零文档时 COM 集合方法解析会失败。"""
-    def log(msg):
-        print(f"  [{time.strftime('%H:%M:%S')}] {msg}")
-
-    n = R(lambda: app.Documents.Count)
-    log(f"Documents.Count = {n}")
-    if n == 0:
-        doc = R(lambda: app.Documents.Add())
-        time.sleep(1.0)
-        doc = R(lambda: app.ActiveDocument)
-    else:
-        doc = R(lambda: app.ActiveDocument)
-    # 清空已有几何：纯 COM 删除，不动命令行
-    ms = R(lambda: doc.ModelSpace)
-    cnt = R(lambda: ms.Count)
-    for i in range(cnt - 1, -1, -1):
-        try:
-            R(lambda i=i: ms.Item(i).Delete())
-        except Exception:
-            pass
-    log(f"清空 {cnt} 个旧实体")
-    for ss in list(doc.SelectionSets):
-        try:
-            ss.Delete()
-        except Exception:
-            pass
-    for var, val in (("BACKGROUNDPLOT", 0), ("LTSCALE", 4), ("INSUNITS", 4),
+    """新建本次任务专用的图纸，并持有 Add 返回的文档引用。"""
+    doc = R(lambda: app.Documents.Add())
+    for var, val in (("LTSCALE", 4), ("INSUNITS", 4),
                      ("DIMTXT", 3.5), ("DIMASZ", 2.5), ("DIMEXO", 0.8),
                      ("DIMEXE", 2.0), ("DIMDEC", 0), ("DIMSCALE", 1),
                      ("CMDECHO", 0)):
@@ -282,8 +251,8 @@ def draw_top(d):
     # 支承板后棱（被圆筒遮住→虚线）
     d.line(ox + 35, oy + 12, ox + 85, oy + 12, "HID")
     # 肋板（u12..48 两侧虚线）
-    d.line(ox + 50, oy + 12, ox + 50, oy + 48, "HID")
-    d.line(ox + 70, oy + 12, ox + 70, oy + 48, "HID")
+    d.line(ox + 55, oy + 12, ox + 55, oy + 48, "HID")
+    d.line(ox + 65, oy + 12, ox + 65, oy + 48, "HID")
     # Ø26 孔虚线（x=47/73）
     d.line(ox + 47, oy, ox + 47, oy + 60, "HID")
     d.line(ox + 73, oy, ox + 73, oy + 60, "HID")
@@ -378,10 +347,7 @@ def audit_and_count(doc):
         print("  [清理] PurgeAll ✓")
     except Exception as e:
         print(f"  [清理] PurgeAll: {str(e)[:60]}")
-    for cmd in ("_ZOOM _E\n", "_REGENALL\n"):
-        R(lambda c=cmd: doc.SendCommand(c))
-        time.sleep(0.4)
-    time.sleep(1.0)
+    R(lambda: doc.Regen(1))  # acAllViewports
     tally = {}
     for o in doc.ModelSpace:
         for attempt in range(10):
@@ -399,45 +365,52 @@ def audit_and_count(doc):
     return tally
 
 
-def plot(doc, device_hint, media_hint, out_path):
-    layout = R(lambda: doc.Layouts("Model"))
-    try:
-        R(lambda: setattr(layout, "ConfigName", device_hint))
-    except Exception as e:
-        print(f"  [打印] 设备 {device_hint}: {str(e)[:60]}")
-        return False
-    names = list(R(lambda: layout.GetCanonicalMediaNames()))
-    pick = None
-    for n in names:
-        if media_hint and media_hint in n:
-            pick = n
-    if pick is None and names:
-        pick = names[-1]
-    R(lambda: setattr(layout, "CanonicalMediaName", pick))
-    print(f"  [打印] {device_hint} 纸张: {pick}")
-    for attr, val in (("PlotType", 1), ("StandardScale", 0), ("PlotWithLineweights", True),
-                      ("CenterPlot", True), ("PlotHidden", False)):
-        try:
-            R(lambda a=attr, v=val: setattr(layout, a, v))
-        except Exception:
-            pass
-    try:
+def plot(doc, device, media_hint, out_path):
+    if out_path.exists():
+        raise FileExistsError(out_path)
+    R(lambda: doc.Activate())
+    layout = R(lambda: doc.ActiveLayout)
+    R(lambda: setattr(layout, "ConfigName", device))
+    R(lambda: layout.RefreshPlotDeviceInfo())
+    names = R(lambda: layout.GetCanonicalMediaNames())
+    media = next((name for name in names if media_hint in name), None)
+    if media is None:
+        raise RuntimeError(f"{device} 不支持所需纸张：{media_hint}")
+    R(lambda: setattr(layout, "CanonicalMediaName", media))
+    for attr, value in (
+        ("PlotType", 1),  # acExtents
+        ("UseStandardScale", True),
+        ("StandardScale", 0),  # acScaleToFit
+        ("PlotWithLineweights", True),
+        ("CenterPlot", True),
+        ("PlotHidden", False),
+    ):
+        R(lambda a=attr, v=value: setattr(layout, a, v))
+    if R(lambda: doc.GetVariable("PSTYLEMODE")):
         R(lambda: setattr(layout, "StyleSheet", "monochrome.ctb"))
-    except Exception as e:
-        print(f"  [打印] 样式表: {str(e)[:50]}")
-    ok = R(lambda: doc.Plot.PlotToFile(out_path))
-    for _ in range(30):
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            ok = True
-            break
-        time.sleep(0.5)
-    print(f"  [打印] {os.path.basename(out_path)}: "
-          f"{'✓ ' + str(os.path.getsize(out_path)) + 'B' if os.path.exists(out_path) else '✗'}")
-    return os.path.exists(out_path)
+
+    original = R(lambda: doc.GetVariable("BACKGROUNDPLOT"))
+    try:
+        R(lambda: doc.SetVariable("BACKGROUNDPLOT", 0))
+        if not R(lambda: doc.Plot.PlotToFile(str(out_path))):
+            raise RuntimeError(f"出图失败：{out_path}")
+        if not out_path.is_file() or out_path.stat().st_size == 0:
+            raise RuntimeError(f"未生成有效文件：{out_path}")
+    finally:
+        R(lambda: doc.SetVariable("BACKGROUNDPLOT", original))
+    print(f"  [打印] {out_path} ({out_path.stat().st_size} bytes)")
 
 
 def main():
-    pythoncom.CoInitialize()
+    parser = argparse.ArgumentParser(description="生成轴承座示例图纸")
+    parser.add_argument("--output-dir", type=Path, default=Path.cwd())
+    parser.add_argument("--keep", action="store_true", help="保留本次创建的图纸")
+    parser.add_argument("legacy_keep", nargs="?", choices=("keep",), help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    output_root = args.output_dir.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output = Path(mkdtemp(prefix="bearing-seat-", dir=output_root))
+    print(f"[输出目录] {output}")
     t0 = time.time()
 
     def step(msg):
@@ -460,18 +433,15 @@ def main():
     step("[7] 审计+清点")
     audit_and_count(doc)
     step("[8] 保存")
-    dwg = os.path.join(OUT, "轴承座零件图.dwg")
-    R(lambda: doc.SaveAs(dwg))
-    print("  [保存]", dwg, os.path.getsize(dwg), "bytes")
+    dwg = output / "轴承座零件图.dwg"
+    R(lambda: doc.SaveAs(str(dwg)))
+    print("  [保存]", dwg, dwg.stat().st_size, "bytes")
     step("[9] 出图 PDF+PNG")
-    plot(doc, "DWG To PDF.pc3", "ISO_A3", os.path.join(OUT, "轴承座零件图.pdf"))
-    plot(doc, "PublishToWeb PNG.pc3", "", os.path.join(OUT, "轴承座零件图.png"))
-    if not KEEP:
+    plot(doc, "DWG To PDF.pc3", "ISO_A3_", output / "轴承座零件图.pdf")
+    plot(doc, "PublishToWeb PNG.pc3", "1600.00_x_1200.00", output / "轴承座零件图.png")
+    if not (args.keep or args.legacy_keep):
         R(lambda: doc.Close(False))
-        R(lambda: app.Quit())
-        step("[10] 已关闭文档并退出 AutoCAD（窗口纪律）")
-    else:
-        step("[10] keep 模式：AutoCAD 保持运行")
+        step("[10] 已关闭本次创建的图纸")
     print("=== 完成 ===")
 
 

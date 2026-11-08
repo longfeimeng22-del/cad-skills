@@ -1,14 +1,21 @@
 ---
 name: cad-automation
 description: CAD自动化绘图skill，内置完整的AutoCAD二次开发知识体系。支持通过Python(pyautocad/win32com)/AutoLISP/C#/VBA连接AutoCAD进行自动化绘图、编辑、图层管理、标注、块与属性、三维建模、批量处理、文件转换等。也涵盖国产中望CAD/浩辰CAD的兼容性。
-category: engineering-cad
-version: 1.2.0
-author: Delancy
+metadata:
+  category: engineering-cad
+  version: "1.3.0"
+  author: Delancy
 ---
 
 # CAD 自动化绘图 Skill（优化版）
 
 本skill提供AutoCAD自动化绘图的完整知识体系，涵盖Python COM自动化、AutoLISP插件开发、国产CAD兼容等核心内容。
+
+## 运行边界
+
+- 生成新图时使用 `Documents.Add()` 返回的文档。修改现有图时先确认完整路径和修改范围，默认打开副本。之后始终使用选定的文档引用。
+- 只释放本次创建的选择集。关闭时只处理本次任务拥有的文档，并保护未保存的修改。
+- 出图使用独立路径，核对 `PlotToFile` 的返回值和新文件。后台出图变量如需修改，先保存原值并在结束后恢复。
 
 ## 0. 2026-06-11 优化版使用原则
 
@@ -273,9 +280,12 @@ dim = acad.model.AddDimAligned(p1, p2, text_pos)
 # 旋转标注
 dim = acad.model.AddDimRotated(p1, p2, text_pos, 0)
 
-# 半径/直径标注
-dim_rad = acad.model.AddDimRadial(APoint(50,50,0), circle, 10)  # leader_length
-dim_dia = acad.model.AddDimDiametric(APoint(50,50,0), circle, 10)
+# 半径/直径标注：假设圆心 (50,50,0)，半径 30
+center = APoint(50, 50, 0)
+chord = APoint(80, 50, 0)
+opposite = APoint(20, 50, 0)
+dim_rad = acad.model.AddDimRadial(center, chord, 10)
+dim_dia = acad.model.AddDimDiametric(chord, opposite, 10)
 
 # 角度标注
 dim_ang = acad.model.AddDimAngular(APoint(0,0,0), p1, p2, APoint(30,30,0))
@@ -373,11 +383,12 @@ ss.Select(5)  # acSelectionSetAll
 # 窗口选择
 ss.Select(0, APoint(0,0,0), APoint(100,100,0))  # acSelectionSetWindow
 
-# 过滤选择 (所有圆,半径>10)
+# 使用 pywin32 SelectionSet 时，过滤组码与值逐项配对
+import pythoncom
 import win32com.client
-ft = win32com.client.VARIANT(0, [0, "CIRCLE", 40, 10.0])  # DXF组码过滤
-fd = win32com.client.VARIANT(0, [0, ">="])
-ss.Select(5, 0, 0, ft, fd)
+ft = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_I2, [0, -4, 40])
+fd = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_VARIANT, ["CIRCLE", ">", 10.0])
+ss.Select(5, pythoncom.Missing, pythoncom.Missing, ft, fd)
 
 # 遍历选择集
 for obj in ss:
@@ -483,21 +494,11 @@ vp = acad.doc.PaperSpace.AddPViewport(
 vp.Display(True)  # 显示视口内容
 ```
 
-### 9.2 打印/导出PDF
+### 9.2 打印/导出 PDF
 
-```python
-# 通过SendCommand
-acad.doc.SendCommand("_PLOT\n")        # 打印
-acad.doc.SendCommand("_EXPORTPDF\n")   # 导出PDF
+在目标文档的活动布局上配置设备，调用 `RefreshPlotDeviceInfo()`，然后从设备支持的规格中选择纸张。打印范围使用 `acExtents`（1）或显式窗口。通过文档的 `Plot.PlotToFile()` 出图，失败时保留诊断信息。配置属性位于 `Layout` 或 `PlotConfiguration` 对象上。
 
-# 通过API
-plot_cfg = acad.doc.Plot  # ActivePlotConfiguration
-plot_cfg.ConfigName = "DWG To PDF.pc3"
-plot_cfg.PaperUnits = 1   # mm
-plot_cfg.StandardScale = 0  # acScaleToFit
-plot_cfg.PlotType = 4      # acExtents
-acad.doc.Plot.PlotToFile("D:/output.pdf")
-```
+参考 [Autodesk PlotType](https://help.autodesk.com/cloudhelp/2020/ENU/AutoCAD-ActiveX-Reference/files/GUID-8C7BADF4-C201-4554-9E23-76DC5A60D787.htm) 与 [Autodesk PlotToFile](https://help.autodesk.com/cloudhelp/2018/DEU/AutoCAD-ActiveX-Reference/files/GUID-85A6B1AF-80AA-4F56-8305-6EFD4A4D8CF8.htm)。
 
 ---
 
@@ -619,7 +620,6 @@ def batch_process_dwgs(folder):
         path = os.path.join(folder, f)
         # 打开
         doc = acad.app.Documents.Open(path)
-        doc = acad.app.ActiveDocument  # 确保获取最新文档
         
         # 在这里做处理...
         # 例如：清理、修改图层、添加标注等
@@ -863,45 +863,9 @@ ss.Delete()
 
 ---
 
-### 铁律 0：启动即清理——关闭孤儿文档 + 清理选择集 🔴
+### 铁律 0：明确任务拥有的文档和选择集
 
-**SW对应**: solidworks-automation Sec 24 铁律0 (CloseDoc 启动清理)
-
-**CAD病灶**: 反复调试运行时，AutoCAD 同样会积累未保存的 Drawing*.dwg，且 COM 选择集(SelectionSets)使用后不 Delete() 会累积导致后续操作报错。
-
-```python
-# ═══════ CAD启动首行代码 ═══════
-import win32com.client
-acad = win32com.client.Dispatch("AutoCAD.Application")
-
-# 1. 清理所有孤儿选择集
-for ss in acad.ActiveDocument.SelectionSets:
-    try:
-        ss.Delete()
-    except:
-        pass
-
-# 2. 如果当前文档为空(Drawing1.dwg)，新建正式文档
-doc = acad.ActiveDocument
-if doc.Name.startswith("Drawing") and doc.ModelSpace.Count == 0:
-    # 用模板新建
-    doc.New("acadiso.dwt")
-```
-
-**LISP 等效**:
-```lisp
-;; 启动清理
-(defun startup_clean ()
-  ;; 清除所有选择集
-  (while (setq ss (ssget "_X"))
-    (setq ss nil))
-  ;; 确保在模型空间
-  (setvar "TILEMODE" 1)
-  (princ)
-)
-```
-
----
+新图用 `doc = app.Documents.Add()`。修改现有图纸时使用明确的文件路径并持有返回的文档引用。选择集用独立名称，在 `finally` 中释放本次创建的选择集。关闭前核对文档所有权与保存状态。
 
 ### 铁律 1：选择集用完必 Delete——CAD 的"GetBodies2 防假跑" 🔴
 
@@ -910,42 +874,18 @@ if doc.Name.startswith("Drawing") and doc.ModelSpace.Count == 0:
 **CAD病灶**: `SelectionSets.Add("SS1")` 使用后不 Delete，再次运行同名选择集会报 "已存在" → 程序中断。
 
 ```python
-# ✅ 安全选择集模式（用完即删）
-def safe_select(acad, filter_type=None):
-    ss_name = "TEMP_SS"
-    # 删除已存在的同名选择集
+from uuid import uuid4
+
+def safe_select(doc):
+    ss = doc.SelectionSets.Add("TEMP_" + uuid4().hex)
     try:
-        acad.ActiveDocument.SelectionSets(ss_name).Delete()
-    except:
-        pass
-    ss = acad.ActiveDocument.SelectionSets.Add(ss_name)
-    ss.Select(5)  # 全选
-    result = list(ss)
-    ss.Delete()  # ← 铁律：用完必删
-    return result
+        ss.Select(5)  # acSelectionSetAll
+        return list(ss)
+    finally:
+        ss.Delete()
 ```
 
-**验证机制——CAD 等效于 GetBodies2**:
-```python
-def verify_drawing(acad, expected_objects: int = None):
-    """验证图纸状态——CAD 的 GetBodies2 等效"""
-    model = acad.ActiveDocument.ModelSpace
-    count = model.Count
-    
-    doc = acad.ActiveDocument
-    doc.SendCommand("_AUDIT Y\n")  # 审计修复
-    doc.SendCommand("_PURGE A * N\n")  # 清理垃圾
-    
-    # 计算实体数（不含选择集内的辅助对象）
-    ss = safe_select(acad)
-    obj_count = len(ss)
-    
-    return {
-        "object_count": obj_count,
-        "model_count": count,
-        "passed": expected_objects is None or obj_count >= expected_objects
-    }
-```
+验证用只读检查，先用 `doc.ModelSpace.Count` 清点实体，再按任务核对类型、图层和关键尺寸。修复与清理属于独立的编辑操作。
 
 ---
 
@@ -1154,23 +1094,19 @@ required_text = ["冲压模具", "凹模板", "凸模", "卸料板", "导柱", "
   `R(lambda: app.Documents.Add())` 把整条属性链包进重试。
 - 同族错误码：`-2147417846`(RPC_RETRYLATER)、`-2147417848`。重试 60×0.5s 足够覆盖常规忙窗。
 
-### 18.2 文档生命周期 🔴
-- **绝不让 Documents 归零**：全部关闭后 COM 集合方法解析直接 `AttributeError <unknown>.Count/.Add`。
-- `Documents.Add()` 后立刻取 `ActiveDocument` 需 `sleep(1.0)` + 忙等重试。
-- 清空旧图用纯 COM 逆序删除：`for i in reversed(range(ms.Count)): ms.Item(i).Delete()`。
-  **不要**用 `_ERASE _ALL`——空文档上会挂在"选择对象:"提示上（见 18.3）。
-- 残留草稿清理只动 `Drawing*.dwg` 自动命名文档；窗口标题带 `*` 表示有未保存修改。
+### 18.2 文档生命周期
+
+示例现在新建专用文档并使用返回的引用。遇到零文档状态下的 COM 连接异常时，报告连接问题，保留用户会话和图纸供检查。
 
 ### 18.3 SendCommand 是最大的坑（能不用就不用）🔴
 - **`_AUDIT _Y` 发现错误时会追加"写审计报告文件?"提示**——命令串没准备这个答案，
   同步 SendCommand 永久挂起（实测卡死 12 分钟）。`_PURGE _A _* _N` 的应答序列同样易错位。
 - 清理一律用 **`doc.PurgeAll()`**（纯 API，无提示）。SendCommand 只用于无追加提示的命令
   （`_ZOOM _E` / `_REGENALL` 实测安全）。AUDIT 对纯生成图形可省略。
-- 解除挂起：`doc.SendCommand(chr(3)*2)`（Ctrl+C）。COM 已卡死 + 锁屏/UIPI 时键盘不可达，
-  最后手段 `taskkill /IM acad.exe /F`（先核对窗口内无用户未保存数据）。
+- 命令等待交互输入时，先确认当前文档和提示，再在目标窗口取消该命令。
 
 ### 18.4 标注 API 实测 ⚡
-- `AddDimDiametric` 是 **3 参** `(Object, ChordPoint, LeaderLength)`，4 参 TypeError。
+- `AddDimDiametric` 是 **3 参** `(ChordPoint, FarChordPoint, LeaderLength)`，4 参 TypeError。
 - **迭代 ModelSpace 拿到的圆/弧引用再传给标注类 API，易报"对象已被删除"**（-2145386420）。
 - 最稳写法：直径类尺寸用跨象限点 `AddDimAligned(p1, p2, tp)` + `TextOverride="%%c50"`
   （%%c=⌀ %%d=° %%p=±）；半径用手工引线+文字。
@@ -1186,7 +1122,7 @@ required_text = ["冲压模具", "凹模板", "凸模", "卸料板", "导柱", "
 - 出图：先 `SetVariable("BACKGROUNDPLOT", 0)`（否则 PlotToFile 异步返回拿不到文件）；
   PDF：`layout.ConfigName="DWG To PDF.pc3"`，纸张从 `GetCanonicalMediaNames()` 里选
   `ISO_A3_(420.00_x_297.00_MM)`；PNG：`PublishToWeb PNG.pc3`（`XGA_Hi-Res_(1600.00_x_1200.00_Pixels)`）；
-  `PlotType=1(Extents) + StandardScale=0(ScaleToFit) + CenterPlot=True`；PlotToFile 后轮询文件落盘。
+  `PlotType=1(Extents) + StandardScale=0(ScaleToFit) + CenterPlot=True`；前台出图后核对返回值与本次生成的文件，并恢复原后台出图设置。
 
 ### 18.6 验证分层 L2/L3/L4 落地
 - L2：`ModelSpace.Count`；L3：按 `(ObjectName, Layer)` 分类型清点（本例 82 实体：

@@ -1,9 +1,10 @@
 ---
 name: cad-designer
 description: CAD设计狮——融合四大IMA CAD知识库的专业设计指导skill。专注CAD制图规范(国标)、参数化设计、图层管理系统、标注标准、批量出图策略、性能优化、AI+CAD趋势与设计检查清单。cad-automation负责写代码画图，CAD设计狮负责告诉AI"怎么设计才对"。
-category: engineering-cad
-version: 1.1.0
-author: Delancy
+metadata:
+  category: engineering-cad
+  version: "1.2.0"
+  author: Delancy
 ---
 
 # CAD设计狮 — CAD 专业设计指导
@@ -47,6 +48,8 @@ author: Delancy
 - 不在缺少压力机参数时承诺可生产。
 - 不把示意图说成完整加工图。
 - 不省略导柱导套、卸料板、凹模板这类识别冲压模具的关键结构。
+
+用同一组尺寸参数生成各投影视图。交付前核对同一特征在各视图中的尺寸、位置和线型，并将出图结果与任务要求对照。批量处理现有图纸时优先对副本执行，按文档引用定位图纸。
 
 ## 第一章：CAD制图规范（国标）
 
@@ -293,22 +296,7 @@ acad.doc.SendCommand('_NEW "D:/Templates/GB_A3.dwt"\n')
 
 ### 6.2 批量打印
 
-```python
-def batch_print(folder, output_folder):
-    """批量打印DWG到PDF"""
-    import os
-    from pyautocad import Autocad
-    acad = Autocad(create_if_not_exists=True)
-    for f in os.listdir(folder):
-        if f.endswith('.dwg'):
-            pdf = os.path.join(output_folder, f.replace('.dwg', '.pdf'))
-            doc = acad.app.Documents.Open(os.path.join(folder, f))
-            # 设置布局
-            acad.doc.ActiveLayout.ConfigName = "DWG To PDF.pc3"
-            # 打印到文件
-            acad.doc.Plot.PlotToFile(pdf)
-            doc.Close(False)  # 不保存
-```
+逐份打开源图的副本，并用打开操作返回的文档引用配置布局和打印。批量任务应为每份图分配独立的 PDF 路径，检查打印返回值和新文件，记录失败的图纸路径。结束时只关闭本次打开的副本。出图 API 见 `cad-automation` 的 9.2 节。
 
 ### 6.3 打印前检查清单
 
